@@ -3,6 +3,7 @@ from datetime import datetime
 import glob, os
 import qbittorrentapi
 import transmission_rpc
+import requests
 import deluge_client
 import logging
 import pytz
@@ -21,6 +22,8 @@ def getDownloadClient(scsetting, log=None):
         scobj = TrDownloadClient(scsetting, log)
     elif scsetting.clienttype == 'de':
         scobj = DeDownloadClient(scsetting, log)
+    elif scsetting.clienttype == 'rt':
+        scobj = RtDownloadClient(scsetting, log)
     return scobj
 
 
@@ -248,10 +251,10 @@ class QbDownloadClient(DownloadClientBase):
             if torList:
                 print('Not Added.')
                 return None
-            else:            
+            else:
                 return torList[-1] if torList else None
 
- 
+
     def addTorrentUrl(self, tor_url, download_location, tor_title):
         if not self.qbClient:
             self.connect()
@@ -447,6 +450,146 @@ class DeDownloadClient(DownloadClientBase):
             st = self.mkSeedTor(deTor)
             activeList.append(st)
         return activeList
+
+
+class RtDownloadClient(DownloadClientBase):
+
+
+    def __call_server(self, url, data=None, files=None, header=None):
+        response = requests.post(url, data=data if data is not None else {}, files=files, headers=header or self.header)
+        return response.json() if 'application/json' in response.headers.get('Content-Type') else response
+
+
+    def __init__(self, scsetting, log=None):
+        self.__cpu_load_path = "/plugins/cpuload/action.php"
+        self.__disk_size_path = "/plugins/diskspace/action.php"
+        self.__default_path = "/plugins/httprpc/action.php"
+        self.__upload_torrent_path = "/php/addtorrent.php"
+        self.__connection_check_path = "/plugins/check_port/action.php?init"
+
+
+        self.scsetting = scsetting
+        self.logger = log
+        self.path = "/" # read this from UI for handling https://mymediaserver.com/rutorrent ( `/rutorrent` will be the path )
+        self.base_url = f'{"http" if self.scsetting.port != 443 else "https"}://{self.scsetting.host}:{self.scsetting.port}{self.path}'
+        self.header = {}
+        if self.scsetting.username:
+            hashed = base64.b64encode(f"{self.scsetting.username}:{self.scsetting.password if self.scsetting.password is not None else ''}"
+                .encode('ascii')).decode('ascii')
+            self.header = {"Authorization": f"Basic {hashed}"}
+
+
+    def connect(self):
+        try:
+            self.__call_server(f'{self.base_url}{self.__connection_check_path}')
+            return True
+        except Exception as err:
+            return None
+
+
+    def abbrevTracker(self, trackerstr):
+        hostnameList = urllib.parse.urlparse(trackerstr).netloc.split('.')
+        if len(hostnameList) == 2:
+            abbrev = hostnameList[0]
+        elif len(hostnameList) == 3:
+            abbrev = hostnameList[1]
+        else:
+            abbrev = 'NO_TRACKER'
+        return abbrev
+
+
+    def __get_torrent_info(self, item):
+        key = item[0]
+        data = item[1]
+        return {
+            'hash': key,
+            'd.is_open': data[0],
+            'd.is_hash_checking': data[1],
+            'd.is_hash_checked': data[2],
+            'd.get_state': data[3],
+            'd.get_name': data[4],
+            'd.get_size_bytes': data[5],
+            'd.get_completed_chunks': data[6],
+            'd.get_size_chunks': data[7],
+            'd.get_bytes_done': data[8],
+            'd.get_up_total': data[9],
+            'd.get_ratio': data[10],
+            'd.get_up_rate': data[11],
+            'd.get_down_rate': data[12],
+            'd.get_chunk_size': data[13],
+            'd.get_custom1': data[14],
+            'd.get_peers_accounted': data[15],
+            'd.get_peers_not_connected': data[16],
+            'd.get_peers_connected': data[17],
+            'd.get_peers_complete': data[18],
+            'd.get_left_bytes': data[19],
+            'd.get_priority': data[20],
+            'd.get_state_changed': data[21],
+            'd.get_skip_total': data[22],
+            'd.get_hashing': data[23],
+            'd.get_chunks_hashed': data[24],
+            'd.get_base_path': data[25],
+            'd.get_creation_date': data[26],
+            'd.get_tracker_focus': data[27],
+            'd.is_active': data[28],
+            'd.get_message': data[29],
+            'd.get_custom2': data[30],
+            'd.get_free_diskspace': data[31],
+            'd.is_private': data[32],
+            'd.is_multi_file': data[33]
+        }
+
+
+    def __extract_necessary_keys(self, torrent):
+        torrent = {self.__do_key_translation(key): value for key, value in torrent.items() if key in self.__rutorrent_keys}
+        return torrent
+
+
+    def mkSeedTor(self, tor):
+        return SeedingTorrent(
+            torrent_hash = tor["hash"],
+            name = tor["d.get_name"],
+            size = int(tor["d.get_size_bytes"]),
+            tracker = "NO_TRACKER",
+            added_date = tor["d.get_creation_date"],
+            status = tor["d.get_state"],
+            save_path = tor["d.get_base_path"].replace(tor["d.get_name"], ""),
+        )
+
+
+    def loadTorrents(self):
+        response = self.__call_server(f'{self.base_url}{self.__default_path}', data={'mode': 'list'})
+        if isinstance(response["t"], list):
+            return []
+        torrents = list(map(self.mkSeedTor, map(self.__get_torrent_info, response["t"].items())))
+        response = self.__call_server(f'{self.base_url}{self.__default_path}', data={'mode': 'trkall'})
+        if isinstance(response, dict):
+            for torrent in torrents:
+                try:
+                    torrent.tracker= self.abbrevTracker(response[torrent.torrent_hash][0][0])
+                except Exception as ex:
+                    torrent.tracker = "NO_TRACKER"
+        return torrents
+
+
+    def findJustAdded(self):
+        torrents = self.loadTorrents()
+        return sorted(torrents, key=lambda t: t.added_date, reverse=True)[0]
+
+
+    def addTorrentUrl(self, tor_url, download_location, tor_title):
+        self.__call_server(
+            f'{self.base_url}{self.__upload_torrent_path}',
+            data={
+                "url": tor_url,
+                "torrents_start_stopped": "1",
+                "label": "SeedCross",
+                "dir_edit": download_location
+            }
+        )
+        # allowing torrent client to download and add the torrent
+        time.sleep(5)
+        return self.findJustAdded()
 
 
 class SeedingTorrent(object):

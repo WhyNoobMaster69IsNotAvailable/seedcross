@@ -275,6 +275,7 @@ class Searcher:
         # print(f'Parsing { len(self.search_results) } results. ', end='')
 
         for result in index_result:
+            result.indexer = result.indexer.replace(" (API)", "")
             max_size_difference = self.max_size_difference
             # older torrents' sizes in blutopia are are slightly off
             if result.indexer == 'Blutopia':

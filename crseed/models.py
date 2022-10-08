@@ -5,6 +5,7 @@ CLIENT_TYPES = [
     ('qb', 'qbittorrent'),
     ('tr', 'transmission'),
     ('de', 'deluge'),
+    ('rt', 'rutorrent'),
 ]
 
 INDEXER_TYPES = [
@@ -80,7 +81,7 @@ class ProcessLog(models.Model):
 class TaskControl(models.Model):
     task_control_id = models.BigAutoField(primary_key=True)
     cancel_task = models.IntegerField(default=0)
-    
+
 
 class ProcessParam(models.Model):
     process_id = models.BigAutoField(primary_key=True)

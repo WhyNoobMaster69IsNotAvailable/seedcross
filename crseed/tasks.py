@@ -54,7 +54,7 @@ class SeedLog():
     def abort(self):
         self.log_object.refresh_from_db()
         return self.log_object.error_abort  > 0
-    
+
     def finish(self):
         self.log_object.live = False
         self.log_object.save()
@@ -70,7 +70,7 @@ def backgroundCrossSeedTask():
     if checkTaskCanclled():
         log.finish()
         return
-    
+
     s = 'Starting at:' + timezone.now().strftime("%m/%d/%Y, %H:%M:%S")
     log.message(s)
     print(s)
